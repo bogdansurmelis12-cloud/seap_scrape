@@ -20,6 +20,9 @@ DAYS_BACK     = 30          # how far back to look
 CPV_PREFIX    = "45"        # CPV division 45 = construction works
 PAGE_SIZE     = 50
 MAX_PAGES     = 40
+# Keep only these contracting authorities (case-insensitive "contains" match).
+# Empty list = keep all. Example: ["CNAIR", "Compania Nationala de Administrare a Infrastructurii", "Primaria Municipiului Bucuresti"]
+AUTHORITIES   = ["Transgaz"]
 # ----------------------------------------------------------
 
 BASE = "https://www.e-licitatie.ro"
@@ -94,6 +97,20 @@ def fetch_all():
     return items
 
 
+def find_authority(it):
+    """Try known field names, then any field whose name mentions 'authority'."""
+    v = first(it, "contractingAuthorityNameAndFN", "contractingAuthorityNameAndFiscalNumber",
+              "contractingAuthorityName", "authorityName", "contractingAuthority")
+    if v:
+        return v
+    for k, val in it.items():
+        if "authority" in k.lower() or "autoritate" in k.lower():
+            v = flat(val)
+            if isinstance(v, str) and v.strip() and not v.strip().isdigit():
+                return v
+    return ""
+
+
 def normalise(it):
     cpv = str(first(it, "cpvCodeAndName", "cpvCode"))
     value = first(it, "ronContractValue", "estimatedValueRon", "ronValue", default=0) or 0
@@ -102,7 +119,7 @@ def normalise(it):
         "published": str(first(it, "noticeStateDate", "publicationDate", "noticeDate"))[:10],
         "deadline": str(first(it, "tenderReceiptDeadline", "receiptDeadline"))[:16].replace("T", " "),
         "title": first(it, "contractTitle", "title"),
-        "authority": first(it, "contractingAuthorityNameAndFiscalNumber", "contractingAuthorityName"),
+        "authority": find_authority(it),
         "value": float(value),
         "cpv": cpv,
         "type": first(it, "sysAcquisitionContractType", "contractType"),
@@ -143,6 +160,8 @@ def write_html(rows):
         f"<td>{e(str(r['authority']))}</td><td data-v='{r['value']:.0f}' class='n'>{r['value']:,.0f}</td>"
         f"<td>{e(r['cpv'])}</td></tr>" for r in rows)
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    auths = sorted({str(r["authority"]) for r in rows if r["authority"]})
+    opts = "".join(f"<option value='{e(a)}'>{e(a)}</option>" for a in auths)
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Construction tenders &gt; {MIN_VALUE_RON/1e6:.0f}M RON</title>
@@ -151,7 +170,8 @@ def write_html(rows):
 @media(prefers-color-scheme:dark){{:root{{--bg:#16181c;--fg:#eee;--mut:#9aa;--line:#2c3036;--acc:#8fb4ea;--hov:#1e2228}}}}
 body{{font:15px system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;padding:24px}}
 h1{{margin:0 0 4px;font-size:22px}} .m{{color:var(--mut);margin-bottom:16px}}
-input{{padding:8px 10px;width:100%;max-width:360px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);margin-bottom:12px}}
+.ctl{{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}}
+input,select{{padding:8px 10px;width:100%;max-width:360px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}}
 .w{{overflow-x:auto}} table{{border-collapse:collapse;width:100%;min-width:900px}}
 th,td{{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}
 th{{cursor:pointer;color:var(--acc);position:sticky;top:0;background:var(--bg)}} tr:hover td{{background:var(--hov)}}
@@ -159,12 +179,14 @@ a{{color:var(--acc)}} .n{{text-align:right;white-space:nowrap}}
 </style></head><body>
 <h1>Construction tenders above {MIN_VALUE_RON:,.0f} RON</h1>
 <div class="m">{len(rows)} notices from the last {DAYS_BACK} days · updated {now} · <a href="tenders.xlsx">Download Excel</a></div>
-<input id="q" placeholder="Filter…" oninput="f()">
+<div class="ctl"><select id="a" onchange="f()"><option value="">All contracting authorities</option>{opts}</select>
+<input id="q" placeholder="Search…" oninput="f()"></div>
 <div class="w"><table id="t"><thead><tr><th>Published</th><th>Deadline</th><th>Title</th><th>Authority</th><th>Value (RON)</th><th>CPV</th></tr></thead>
 <tbody>{body}</tbody></table></div>
 <script>
-function f(){{const q=document.getElementById('q').value.toLowerCase();
-document.querySelectorAll('#t tbody tr').forEach(r=>r.style.display=r.textContent.toLowerCase().includes(q)?'':'none')}}
+function f(){{const q=document.getElementById('q').value.toLowerCase(),a=document.getElementById('a').value;
+document.querySelectorAll('#t tbody tr').forEach(r=>r.style.display=
+(r.textContent.toLowerCase().includes(q)&&(!a||r.cells[3].textContent===a))?'':'none')}}
 document.querySelectorAll('th').forEach((h,i)=>h.onclick=()=>{{const b=document.querySelector('#t tbody');
 const rs=[...b.rows];const d=h.dataset.d=h.dataset.d==='1'?'-1':'1';
 rs.sort((a,c)=>{{const x=a.cells[i].dataset.v??a.cells[i].textContent,y=c.cells[i].dataset.v??c.cells[i].textContent;
@@ -173,13 +195,47 @@ return (isNaN(x)||isNaN(y)?x.localeCompare(y):x-y)*d}});rs.forEach(r=>b.appendCh
     (OUT / "index.html").write_text(page, encoding="utf-8")
 
 
+def fold(s):
+    """lowercase + strip diacritics so 'Primăria' matches 'primaria'."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(s))
+    return "".join(c for c in s if not unicodedata.combining(c)).lower()
+
+
 def main():
     raw = fetch_all()
-    rows = [normalise(i) for i in raw]
-    rows = [r for r in rows if r["value"] >= MIN_VALUE_RON and is_construction(r)]
+    all_rows = [normalise(i) for i in raw]
+    dates = sorted(r["published"] for r in all_rows if r["published"])
+    print(f"[1] Fetched {len(raw)} notices"
+          + (f", published {dates[0]} .. {dates[-1]}" if dates else ""))
+    if len(raw) >= MAX_PAGES * PAGE_SIZE:
+        print("    WARNING: hit MAX_PAGES limit, some notices were not downloaded. Raise MAX_PAGES.")
+
+    rows = [r for r in all_rows if r["value"] >= MIN_VALUE_RON]
+    print(f"[2] Value >= {MIN_VALUE_RON:,}: {len(rows)}")
+    rows = [r for r in rows if is_construction(r)]
+    print(f"[3] Construction (CPV {CPV_PREFIX}* or works): {len(rows)}")
+
+    if AUTHORITIES:
+        wanted = [fold(a) for a in AUTHORITIES]
+        match = lambda r: any(a in fold(r["authority"]) for a in wanted)
+        # Show what the authority filter sees, ignoring value/CPV, to explain empty results
+        seen = [r for r in all_rows if match(r)]
+        print(f"[4] Notices from these authorities (any value/type): {len(seen)}")
+        for r in seen[:15]:
+            print(f"    - {r['published']} | {r['value']:,.0f} RON | cpv={str(r['cpv'])[:30]} "
+                  f"| type={r['type']} | {str(r['authority'])[:60]}")
+        if not seen:
+            names = sorted({str(r['authority']) for r in all_rows})[:15]
+            print("    No match. Sample authority names in the data:")
+            for n in names:
+                print("      ", n)
+        rows = [r for r in rows if match(r)]
+        print(f"[5] After authority filter: {len(rows)}")
+
     rows.sort(key=lambda r: r["published"], reverse=True)
     write_excel(rows); write_html(rows)
-    print(f"Fetched {len(raw)} notices, kept {len(rows)} -> docs/tenders.xlsx, docs/index.html")
+    print(f"Kept {len(rows)} -> docs/tenders.xlsx, docs/index.html")
 
 
 if __name__ == "__main__":
