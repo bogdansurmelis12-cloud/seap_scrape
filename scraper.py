@@ -57,10 +57,19 @@ def payload(page_index, start_date):
     }
 
 
+def flat(v):
+    """API sometimes returns {'id': 1, 'text': '...'} objects; reduce to plain text."""
+    if isinstance(v, dict):
+        return str(v.get("text") or v.get("name") or v.get("id") or "")
+    if isinstance(v, list):
+        return ", ".join(flat(x) for x in v)
+    return v
+
+
 def first(d, *keys, default=""):
     for k in keys:
         if d.get(k) not in (None, ""):
-            return d[k]
+            return flat(d[k])
     return default
 
 
@@ -68,7 +77,7 @@ def fetch_all():
     s = requests.Session()
     s.headers.update(HEADERS)
     s.get(f"{BASE}/pub/notices/contract-notices/list/0/0", timeout=30)  # pick up cookies
-    start = (dt.datetime.utcnow() - dt.timedelta(days=DAYS_BACK)).strftime("%Y-%m-%dT00:00:00.000Z")
+    start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=DAYS_BACK)).strftime("%Y-%m-%dT00:00:00.000Z")
     items = []
     for p in range(MAX_PAGES):
         r = s.post(API, data=json.dumps(payload(p, start)), timeout=60)
